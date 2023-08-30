@@ -1,0 +1,210 @@
+....fd.r.p...i.c....r................................................................................
+...................s...............................................................................
+
+
+
+
+/* for i = 0; i < num_lines; i++ {
+		startTick := baseTick + i*timeWidth
+		endTick := startTick + timeWidth
+
+		if num_lines == 1 {
+			endTick += inst.Values["fetch"].Val - baseTick
+		}
+		output.WriteRune('[')
+		pos := 0
+		for _, event := range inst.Preorder {
+			if event.Val < startTick || event.Val > endTick {
+				continue
+			}
+			if (event.Name == "dispatch") && (inst.Values["dispatch"].Val == inst.Values["issue"].Val) {
+				continue
+			}
+
+			currentStyle = stages[event.Name].Style
+
+			// write dots
+			var subconstr strings.Builder
+			subconstr.WriteString(stages[event.Name].Shorthand)
+			for k := 0; k < (int(event.Val)/args.CycleTime)-pos; k++ {
+				subconstr.WriteRune(dot)
+			}
+
+			output.WriteString(currentStyle.Styled(subconstr.String()))
+
+			if event.Val == lastEvent {
+				currentStyle = termenv.String("")
+			}
+			pos = int(event.Val)/args.CycleTime + 1
+		}
+		// fill remaining
+		l := args.Width - pos
+		if l < 0 {
+			fmt.Println("l", l)
+			l = 0
+		}
+		s := make([]byte, l)
+		for k := 0; k < l; k++ {
+			s[k] = byte(dot)
+		}
+		output.WriteString(currentStyle.Styled(string(s)))
+		output.WriteString(fmt.Sprintf("]-(%15d)", baseTick+i*timeWidth))
+		if i == 0 {
+			output.WriteString(fmt.Sprintf("%10x.%d %25s [%10d]", inst.PC, inst.UPC, inst.Disasm, inst.SN))
+			if args.Timestamps {
+				output.WriteString(fmt.Sprintf("	f=%d, r=%d\n", inst.Values["fetch"].Val, inst.Values["retire"].Val))
+			}
+			output.WriteRune('\n')
+		} else {
+			output.WriteString("		...\n")
+		}
+
+	} */
+
+
+
+/*
+func (inst *Instr) PrintInst(args *CLIArgs) string {
+	var dot rune = '.'
+
+	var currentStyle termenv.Style
+	var output strings.Builder
+	fetch := inst.Values["fetch"].Val
+
+	var timeWidth = uint(args.Width * args.CycleTime)
+	baseTick := fetch - fetch%timeWidth // set basetick to the lowest multiple of timeWidth
+	lastEvent := inst.LastEvent(args)   // lastEvent is in raw ticks
+	numLines := (lastEvent-fetch)/timeWidth + 1
+	if inst.Values["retire"].Val == 0 {
+		dot = '='
+	}
+
+	output.WriteRune('[')
+	var written uint = 0
+	var currentLine uint = 1
+
+	for len(inst.Preorder) != 0 {
+		var event ISort
+		var subconstr strings.Builder
+
+		event, inst.Preorder = inst.Preorder[0], inst.Preorder[1:]
+		// write leading
+		for written < (event.Val / uint(args.CycleTime)) {
+			subconstr.WriteRune(dot)
+			written++
+			// ! TODO: handle compact case
+
+			// if written up to line limit,
+			if written >= args.Width*currentLine {
+				// immediately push and reset subconstr
+				output.WriteString(currentStyle.Styled(subconstr.String()))
+				subconstr.Reset()
+
+				// handle line end
+				inst.handleLineEnd(&output, currentLine, args, baseTick+uint(currentLine)*timeWidth)
+				output.WriteString("[")
+
+				currentLine++
+			}
+		}
+		// push leading
+		output.WriteString(currentStyle.Styled(subconstr.String()))
+		written++
+		subconstr.Reset()
+
+		// get a new style, write marker
+		currentStage := stages[event.Name]
+		currentStyle = currentStage.Style
+		output.WriteString(currentStyle.Styled(currentStage.Shorthand))
+	}
+	// write remainder of last line, if necessary
+	for written < args.Width*numLines {
+		output.WriteRune(dot)
+		written++
+	}
+	inst.handleLineEnd(&output, currentLine, args, baseTick+uint(currentLine)*timeWidth)
+	fmt.Println("numlines", numLines)
+
+	return output.String()
+}
+
+
+*/
+
+
+func (l *LineWorker) Run(args *CLIArgs) {
+	defer l.WG.Done()
+	var dot byte = '.'
+	var currentStyle termenv.Style
+	var timeWidth = uint(args.Width * args.CycleTime) // number of cycles which can be represented on a given line
+
+	for inst := range l.InstIn {
+		currentStyle = termenv.Style{}
+		l.StringConstr.Reset()
+		l.StringConstr.Grow(int(args.Width))
+
+		fetch := inst.Values["fetch"].Val
+
+		baseTick := (fetch / timeWidth) * timeWidth // set basetick to the lowest multiple of timeWidth
+		lastEvent := inst.LastEvent(args)           // lastEvent is in raw ticks
+		numLines := (lastEvent-fetch)/timeWidth + 1
+		dot = '.'
+		if inst.Values["retire"].Val == 0 {
+			dot = '='
+		}
+
+		l.StringConstr.WriteRune('[')
+		var written uint = 0
+		var currentLine uint = 1
+
+		for _, event := range inst.Preorder {
+			var subconstr strings.Builder
+			// adjust event time using baseTick
+			if event.Val == 0 {
+				continue
+			}
+			event.Val -= baseTick
+			// write leading
+			//delta := int((event.Val / args.CycleTime) - written)
+			//dots := bytes.Repeat([]byte{dot}, min(delta,args.Width & currentLine))
+			for written < (event.Val / uint(args.CycleTime)) {
+				subconstr.WriteRune(rune(dot))
+				written++
+				// ! TODO: handle compact case
+
+				// if written up to line limit,
+				if written >= args.Width*currentLine {
+					// immediately push and reset subconstr
+					l.StringConstr.WriteString(currentStyle.Styled(subconstr.String()))
+					subconstr.Reset()
+
+					// handle line end
+					inst.handleLineEnd(&l.StringConstr, currentLine, args, baseTick+uint(currentLine)*timeWidth)
+					l.StringConstr.WriteRune('[')
+
+					currentLine++
+				}
+			}
+			// push leading
+			l.StringConstr.WriteString(currentStyle.Styled(subconstr.String()))
+			written++
+			subconstr.Reset()
+
+			// get a new style, write marker
+			currentStage := stages[event.Name]
+			currentStyle = currentStage.Style
+			l.StringConstr.WriteString(currentStyle.Styled(currentStage.Shorthand))
+		}
+		// write remainder of last line, if necessary
+		for written < args.Width*numLines {
+			l.StringConstr.WriteRune(rune(dot))
+			written++
+		}
+		inst.handleLineEnd(&l.StringConstr, currentLine, args, baseTick+uint(currentLine)*timeWidth)
+
+		l.LinesOut <- &ToOrder{inst.SN, l.StringConstr.String()}
+	}
+}
+
+
+
