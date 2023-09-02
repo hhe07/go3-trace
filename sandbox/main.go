@@ -88,14 +88,23 @@ func main() {
 	fmt.Println(o.Output)
 
 	fmt.Println("done")
+	/*
+		a := make([]int, 5)
+		for p := 0; p < 5; p++ {
+			a[p] = p
+		}
+		var b int
+		b, a = a[0], a[1:]
+		fmt.Printf("%d\n", b)
+		fmt.Printf("%d\n", len(a))
+		a[4] = 0 */
 
-	a := make([]int, 5)
-	for p := 0; p < 5; p++ {
-		a[p] = p
-	}
-	var b int
-	b, a = a[0], a[1:]
-	fmt.Printf("%d\n", b)
-	fmt.Printf("%d\n", len(a))
-	a[4] = 0
+	// conclusion: string builders don't keep capacity
+	/* s := strings.Builder{}
+	s.Grow(10)
+	s.WriteString("test")
+	fmt.Println(s)
+	fmt.Println(s.Cap())
+	s.Reset()
+	fmt.Println(s.Cap()) */
 }

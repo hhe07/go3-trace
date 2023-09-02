@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"os"
 	"sort"
 	"sync"
@@ -27,6 +28,14 @@ func (o *OrderStage) Init(a *CLIArgs, i <-chan *ToOrder) {
 		panic("error on creating output file")
 	}
 	o.OutHandle = *bufio.NewWriter(o.Outfile)
+	o.OutHandle.WriteString("// f = fetch, d = decode, n = rename, p = dispatch, i = issue, c = complete, r = retire")
+	if a.StoreCompletions {
+		o.OutHandle.WriteString(", s = store-complete")
+	}
+	o.OutHandle.WriteString("\n\n")
+	pad := bytes.Repeat([]byte{' '}, int(a.Width-8))
+	o.OutHandle.Write(pad)
+	o.OutHandle.WriteString("timeline		  tick  	pc.upc  disasm			  seq_num\n")
 }
 
 func (o *OrderStage) Done() bool {

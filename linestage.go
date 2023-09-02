@@ -2,11 +2,9 @@ package main
 
 import (
 	"bufio"
-	"strconv"
+	"bytes"
 	"strings"
 	"sync"
-
-	"github.com/muesli/termenv"
 )
 
 type LineStage struct {
@@ -31,72 +29,120 @@ func (l *LineWorker) Init(input <-chan *Instr, output chan<- *ToOrder, wg *sync.
 
 func (l *LineWorker) Run(args *CLIArgs) {
 	defer l.WG.Done()
-	var dot byte = '.'
-	var currentStyle termenv.Style
-	var timeWidth = uint(args.Width * args.CycleTime) // number of cycles which can be represented on a given line
+	var colour string
+
+	var dots []byte // when true, skip to '=' dots
+	var dotBuffer []byte = append(bytes.Repeat([]byte{'.'}, 150), bytes.Repeat([]byte{'='}, 150)...)
+	var timeWidth = args.Width * args.CycleTime // number of cycles which can be represented on a given line
+	var subconstr strings.Builder
 
 	for inst := range l.InstIn {
-		currentStyle = termenv.Style{}
-		l.StringConstr.Reset()
-		l.StringConstr.Grow(int(args.Width))
+		var stw string
 
-		fetch := inst.Values["fetch"].Val
+		if args.CommittedOnly && inst.Values[Retire].Val == 0 {
+			continue
+		}
+		// reset variables
+		colour = ""
+
+		l.StringConstr.Reset()
+
+		fetch := inst.Values[Fetch].Val
 
 		baseTick := (fetch / timeWidth) * timeWidth // set basetick to the lowest multiple of timeWidth
 		lastEvent := inst.LastEvent(args)           // lastEvent is in raw ticks
-		numLines := (lastEvent-fetch)/timeWidth + 1
-		dot = '.'
-		if inst.Values["retire"].Val == 0 {
-			dot = '='
+		numLines := (lastEvent-fetch)/timeWidth + 1 // number of lines required
+
+		dots = dotBuffer[:150]
+		if inst.Values[Fetch].Val == 0 {
+			dots = dotBuffer[150:]
 		}
 
 		l.StringConstr.WriteRune('[')
 		var written uint = 0
 		var currentLine uint = 1
 
+		l.StringConstr.Grow(int(args.Width*numLines) + 250) // some amount of padding for formatting characters
+
 		for _, event := range inst.Preorder {
-			var subconstr strings.Builder
-			// adjust event time using baseTick
+			subconstr.Reset()
+			subconstr.Grow(int(args.Width))
+
 			if event.Val == 0 {
 				continue
 			}
+			// adjust event time using baseTick
 			event.Val -= baseTick
-			for written < (event.Val / uint(args.CycleTime)) {
-				subconstr.WriteRune(rune(dot))
-				written++
-				// ! TODO: handle compact case
 
-				// if written up to line limit,
-				if written >= args.Width*currentLine {
-					// immediately push and reset subconstr
-					l.StringConstr.WriteString(currentStyle.Styled(subconstr.String()))
+			eTime := (event.Val / args.CycleTime)
+			if eTime < written {
+				continue
+			}
+			dotsToWrite := eTime - written
+			lineLim := args.Width * currentLine
+			for dotsToWrite > 0 {
+				// if going to overflow line,
+				if (written + dotsToWrite) >= lineLim {
+
+					t := lineLim - written
+
+					subconstr.Write(dots[:t])
+					dotsToWrite -= t
+					written += t
+
+					writeWithColour(colour, subconstr.String(), &l.StringConstr)
 					subconstr.Reset()
 
 					// handle line end
-					inst.handleLineEnd(&l.StringConstr, currentLine, args, baseTick+uint(currentLine)*timeWidth)
+					inst.handleLineEnd(&l.StringConstr, currentLine, args, baseTick+currentLine*timeWidth)
 					l.StringConstr.WriteRune('[')
 
 					currentLine++
+					lineLim += args.Width
+				} else {
+					subconstr.Write(dots[:dotsToWrite])
+					written += dotsToWrite
+					dotsToWrite = 0
 				}
 			}
-			// push leading
-			l.StringConstr.WriteString(currentStyle.Styled(subconstr.String()))
-			written++
+
+			writeWithColour(colour, subconstr.String(), &l.StringConstr)
 			subconstr.Reset()
 
 			// get a new style, write marker
 			currentStage := stages[event.Name]
-			currentStyle = currentStage.Style
-			l.StringConstr.WriteString(currentStyle.Styled(currentStage.Shorthand))
-		}
-		// write remainder of last line, if necessary
-		for written < args.Width*numLines {
-			l.StringConstr.WriteRune(rune(dot))
+			colour = currentStage.ColourIntro
+			// push leading
+			writeWithColour(colour, currentStage.Shorthand, &l.StringConstr)
 			written++
-		}
-		inst.handleLineEnd(&l.StringConstr, currentLine, args, baseTick+uint(currentLine)*timeWidth)
 
-		l.LinesOut <- &ToOrder{inst.SN, l.StringConstr.String()}
+			// if the above pushed us to line limit, handle
+			if written == lineLim {
+				inst.handleLineEnd(&l.StringConstr, currentLine, args, baseTick+currentLine*timeWidth)
+				l.StringConstr.WriteRune('[')
+				currentLine++
+				lineLim += args.Width
+			}
+		}
+
+		// write remainder of last line, if necessary
+		if written <= args.Width*numLines {
+			e := args.Width*numLines - written
+			l.StringConstr.Write(dots[:e])
+			written += e
+		}
+
+		if currentLine > numLines && numLines == 1 {
+			s := strings.Split(l.StringConstr.String(), "\n")
+			l := len(s[1]) - strings.Count(s[1], ANSITerminator)*4 - strings.Count(s[1], ANSIIntro+"[48")*11
+			stw = s[1] + s[0][l:] + "\n"
+			currentLine--
+		} else {
+			inst.handleLineEnd(&l.StringConstr, currentLine, args, baseTick+currentLine*timeWidth)
+			stw = l.StringConstr.String()
+		}
+
+		l.LinesOut <- &ToOrder{inst.SN, stw}
 	}
 }
 
@@ -114,51 +160,24 @@ func (l *LineStage) ProcessLine(scanner *bufio.Scanner, args *CLIArgs, o *OrderS
 		go l.Workers[w].Run(args)
 	}
 
-	var i *Instr
-	var fields []string
-
+	s := make([]string, 7)
+	ct := 0
 	for scanner.Scan() {
 		cl := scanner.Text()
-		if len(cl) < 10 {
+		if len(cl) < 10 || cl[:10] != "O3PipeView" {
 			continue
 		}
-		fields = strings.SplitN(cl, ":", 10)
-		if fields[0] != "O3PipeView" || len(fields) == 1 {
-			continue // immediately discard
-		}
-
-		t, err := strconv.Atoi(fields[2])
-		handleConvErr(err)
-
-		if t < int(args.TickRange.Start) {
-			continue
-		}
-		if fields[1] == "fetch" {
-
-			s, err := strconv.Atoi(fields[5])
-			handleConvErr(err)
-
-			if fields[1] == "fetch" && s < int(args.InstRange.Start) {
+		s[ct] = cl
+		ct++
+		if ct == 7 {
+			inst := BuildInst(s, args)
+			if inst == nil {
+				ct = 0
 				continue
 			}
-			pc, err := strconv.ParseInt(fields[3], 0, 64)
-			handleConvErr(err)
-
-			upc, err := strconv.Atoi(fields[4])
-			handleConvErr(err)
-
-			i = &Instr{
-				Values: map[string]ISort{"fetch": {"fetch", uint(t)}},
-				PC:     uint(pc),
-				UPC:    uint(upc),
-				Disasm: fields[6],
-				SN:     uint(s),
-			}
-		} else {
-			i.Values[fields[1]] = ISort{fields[1], uint(t)}
-			if fields[1] == "retire" {
-				l.WDist <- i
-			}
+			l.WDist <- inst
+			s = make([]string, 7)
+			ct = 0
 		}
 	}
 	close(l.WDist)
@@ -173,4 +192,10 @@ func handleConvErr(e error) {
 	if e != nil {
 		panic("bad conversion")
 	}
+}
+
+func writeWithColour(colour, b string, mb *strings.Builder) {
+	mb.WriteString(colour)
+	mb.WriteString(b)
+	mb.WriteString(ANSITerminator)
 }
